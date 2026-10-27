@@ -50,37 +50,39 @@ class AxSignatureRequest(BaseModel):
 # Helper: Mengambil key dari Cloudflare bindings (request.scope["env"])
 # ------------------------------------------------------------------
 def get_keys(request: Request):
-    try:
-        # Ambil objek env dari scope request
-        cf_env = request.scope.get("env")
-        if not cf_env:
-            raise ValueError("Objek 'env' tidak ditemukan di request.scope")
-        
-        # Akses properti secara langsung (aman untuk JsProxy di Pyodide)
-        try:
-            xdata_key = cf_env.XDATA_KEY
-        except Exception:
-            xdata_key = None
-            
-        try:
-            ax_key = cf_env.AX_API_SIG_KEY
-        except Exception:
-            ax_key = None
-            
-        try:
-            x_secret = cf_env.X_API_BASE_SECRET
-        except Exception:
-            x_secret = None
+    # Di Cloudflare Workers, bindings/secrets ada di scope["env"]
+    cf_env = request.scope.get("env")
+    
+    if cf_env is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Objek 'env' tidak ditemukan di request scope.",
+        )
 
-        # Validasi apakah semua secret sudah terisi
-        if not all([xdata_key, ax_key, x_secret]):
-            raise ValueError(f"Secret tidak lengkap. XDATA_KEY: {bool(xdata_key)}, AX_API_SIG_KEY: {bool(ax_key)}, X_API_BASE_SECRET: {bool(x_secret)}")
-            
-        return xdata_key, ax_key, x_secret
-        
-    except Exception as e:
-        # Kembalikan detail error ke client agar mudah di-debug
-        raise HTTPException(status_code=500, detail=f"Environment Error: {str(e)}")
+    # Akses properti JsProxy secara langsung. Jika secret tidak ada,
+    # kita tangkap exception-nya agar Worker tidak crash.
+    try:
+        xdata_key = cf_env.XDATA_KEY
+    except Exception:
+        xdata_key = None
+
+    try:
+        ax_key = cf_env.AX_API_SIG_KEY
+    except Exception:
+        ax_key = None
+
+    try:
+        x_secret = cf_env.X_API_BASE_SECRET
+    except Exception:
+        x_secret = None
+
+    if not all([xdata_key, ax_key, x_secret]):
+        raise HTTPException(
+            status_code=500,
+            detail=f"Secret tidak lengkap. XDATA_KEY: {bool(xdata_key)}, AX_API_SIG_KEY: {bool(ax_key)}, X_API_BASE_SECRET: {bool(x_secret)}",
+        )
+
+    return xdata_key, ax_key, x_secret
 
 # ------------------------------------------------------------------
 # Core Crypto Functions (Deterministik)
@@ -122,14 +124,14 @@ def make_x_signature_payment(request: Request, req: PaymentSignatureRequest) -> 
     return hmac.new(key_str.encode(), msg, hashlib.sha512).hexdigest()
 
 # ------------------------------------------------------------------
-# API Routes
+# API Routes (WAJIB async def untuk Cloudflare Workers)
 # ------------------------------------------------------------------
 @app.get("/")
-def root():
+async def root():
     return {"status": "ok", "service": "Crypto Signature API"}
 
 @app.post("/encrypt")
-def api_encrypt(body: EncryptRequest, request: Request):
+async def api_encrypt(body: EncryptRequest, request: Request):
     try:
         result = encrypt_xdata(request, body.plaintext, body.xtime_ms)
         return {"encrypted": result}
@@ -137,7 +139,7 @@ def api_encrypt(body: EncryptRequest, request: Request):
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/decrypt")
-def api_decrypt(body: DecryptRequest, request: Request):
+async def api_decrypt(body: DecryptRequest, request: Request):
     try:
         result = decrypt_xdata(request, body.xdata, body.xtime_ms)
         return {"decrypted": result}
@@ -145,19 +147,19 @@ def api_decrypt(body: DecryptRequest, request: Request):
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/signature/general")
-def api_signature_general(body: SignatureRequest, request: Request):
+async def api_signature_general(body: SignatureRequest, request: Request):
     if not all([body.id_token, body.method, body.path]):
         raise HTTPException(400, "id_token, method, path wajib diisi")
     sig = make_x_signature(request, body.id_token, body.method, body.path, body.sig_time_sec)
     return {"signature": sig}
 
 @app.post("/signature/payment")
-def api_signature_payment(body: PaymentSignatureRequest, request: Request):
+async def api_signature_payment(body: PaymentSignatureRequest, request: Request):
     sig = make_x_signature_payment(request, body)
     return {"signature": sig}
 
 @app.post("/signature/ax")
-def api_signature_ax(body: AxSignatureRequest, request: Request):
+async def api_signature_ax(body: AxSignatureRequest, request: Request):
     sig = make_ax_api_signature(request, body.ts_for_sign, body.contact, body.code, body.contact_type)
     return {"signature": sig}
 

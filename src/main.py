@@ -50,26 +50,37 @@ class AxSignatureRequest(BaseModel):
 # Helper: Mengambil key dari Cloudflare bindings (request.scope["env"])
 # ------------------------------------------------------------------
 def get_keys(request: Request):
-    # Cloudflare Workers ASGI menyimpan bindings/secrets di request.scope["env"]
-    cf_env = request.scope.get("env")
-    
-    if not cf_env:
-        raise HTTPException(
-            status_code=500,
-            detail="Environment tidak ditemukan di request scope.",
-        )
+    try:
+        # Ambil objek env dari scope request
+        cf_env = request.scope.get("env")
+        if not cf_env:
+            raise ValueError("Objek 'env' tidak ditemukan di request.scope")
+        
+        # Akses properti secara langsung (aman untuk JsProxy di Pyodide)
+        try:
+            xdata_key = cf_env.XDATA_KEY
+        except Exception:
+            xdata_key = None
+            
+        try:
+            ax_key = cf_env.AX_API_SIG_KEY
+        except Exception:
+            ax_key = None
+            
+        try:
+            x_secret = cf_env.X_API_BASE_SECRET
+        except Exception:
+            x_secret = None
 
-    # Gunakan getattr karena cf_env adalah JsProxy
-    xdata_key = getattr(cf_env, "XDATA_KEY", None)
-    ax_key = getattr(cf_env, "AX_API_SIG_KEY", None)
-    x_secret = getattr(cf_env, "X_API_BASE_SECRET", None)
-
-    if not all([xdata_key, ax_key, x_secret]):
-        raise HTTPException(
-            status_code=500,
-            detail="Environment secrets belum di-set di Cloudflare Dashboard.",
-        )
-    return xdata_key, ax_key, x_secret
+        # Validasi apakah semua secret sudah terisi
+        if not all([xdata_key, ax_key, x_secret]):
+            raise ValueError(f"Secret tidak lengkap. XDATA_KEY: {bool(xdata_key)}, AX_API_SIG_KEY: {bool(ax_key)}, X_API_BASE_SECRET: {bool(x_secret)}")
+            
+        return xdata_key, ax_key, x_secret
+        
+    except Exception as e:
+        # Kembalikan detail error ke client agar mudah di-debug
+        raise HTTPException(status_code=500, detail=f"Environment Error: {str(e)}")
 
 # ------------------------------------------------------------------
 # Core Crypto Functions (Deterministik)
